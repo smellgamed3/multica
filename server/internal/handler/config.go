@@ -3,29 +3,25 @@ package handler
 import (
 	"net/http"
 	"os"
+
+	"github.com/multica-ai/multica/server/internal/auth"
 )
 
 type AppConfig struct {
 	CdnDomain string `json:"cdn_domain"`
-	// Public auth config consumed by the web app at runtime so self-hosted
-	// deployments do not need to rebuild the frontend image when operators
-	// toggle signup or wire Google OAuth.
+
 	AllowSignup    bool   `json:"allow_signup"`
 	GoogleClientID string `json:"google_client_id,omitempty"`
 
-	// PostHog public config for the frontend. The key is the same Project
-	// API Key the backend uses; returning it here (instead of baking it
-	// into the frontend bundle via NEXT_PUBLIC_*) means self-hosted
-	// instances — whose server returns an empty key — automatically
-	// disable frontend event shipping too.
 	PosthogKey  string `json:"posthog_key"`
 	PosthogHost string `json:"posthog_host"`
+
+	OIDCEnabled      bool   `json:"oidc_enabled"`
+	OIDCProviderName string `json:"oidc_provider_name,omitempty"`
 }
 
-// GetConfig is mounted on the public (unauthenticated) route group because
-// the web app calls it before login to decide whether to render the Google
-// sign-in button and signup UI. Only add fields here that are safe to expose
-// to anonymous callers — never user- or tenant-scoped data.
+// GetConfig 是公开路由（无需认证），web 应用在登录前调用此接口决定是否渲染
+// Google/SSO 登录按钮及注册 UI。仅添加对匿名调用者安全的字段。
 func (h *Handler) GetConfig(w http.ResponseWriter, r *http.Request) {
 	config := AppConfig{
 		AllowSignup:    os.Getenv("ALLOW_SIGNUP") != "false",
@@ -34,9 +30,11 @@ func (h *Handler) GetConfig(w http.ResponseWriter, r *http.Request) {
 	if h.Storage != nil {
 		config.CdnDomain = h.Storage.CdnDomain()
 	}
+	if h.OIDC != nil && h.OIDC.Enabled() {
+		config.OIDCEnabled = true
+		config.OIDCProviderName = auth.ProviderName()
+	}
 
-	// Re-read from env on every request so operators can rotate keys via
-	// secret refresh without a server restart.
 	if v := os.Getenv("ANALYTICS_DISABLED"); v != "true" && v != "1" {
 		config.PosthogKey = os.Getenv("POSTHOG_API_KEY")
 		config.PosthogHost = os.Getenv("POSTHOG_HOST")

@@ -16,11 +16,13 @@ import (
 	"strings"
 	"time"
 
+	"github.com/coreos/go-oidc/v3/oidc"
 	"github.com/golang-jwt/jwt/v5"
 	"github.com/jackc/pgx/v5/pgtype"
 	"github.com/multica-ai/multica/server/internal/analytics"
 	"github.com/multica-ai/multica/server/internal/auth"
 	"github.com/multica-ai/multica/server/internal/logger"
+	"golang.org/x/oauth2"
 	db "github.com/multica-ai/multica/server/pkg/db/generated"
 )
 
@@ -612,6 +614,171 @@ func (h *Handler) IssueCliToken(w http.ResponseWriter, r *http.Request) {
 func (h *Handler) Logout(w http.ResponseWriter, r *http.Request) {
 	auth.ClearAuthCookies(w)
 	writeJSON(w, http.StatusOK, map[string]string{"message": "logged out"})
+}
+
+func (h *Handler) OIDCLogin(w http.ResponseWriter, r *http.Request) {
+	if h.OIDC == nil || !h.OIDC.Enabled() {
+		writeError(w, http.StatusNotFound, "OIDC is not configured")
+		return
+	}
+
+	state, err := auth.GenerateState()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to generate state")
+		return
+	}
+	nonce, err := auth.GenerateState()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to generate nonce")
+		return
+	}
+
+	auth.SetOIDCCookie(w, r, "oidc_state", state)
+	auth.SetOIDCCookie(w, r, "oidc_nonce", nonce)
+
+	verifier := oauth2.GenerateVerifier()
+	auth.SetOIDCCookie(w, r, "oidc_pkce", verifier)
+
+	redirectURL := h.OIDC.OAuth2Config.AuthCodeURL(
+		state,
+		oidc.Nonce(nonce),
+		oauth2.S256ChallengeOption(verifier),
+	)
+	http.Redirect(w, r, redirectURL, http.StatusFound)
+}
+
+func (h *Handler) OIDCCallback(w http.ResponseWriter, r *http.Request) {
+	if h.OIDC == nil || !h.OIDC.Enabled() {
+		writeError(w, http.StatusNotFound, "OIDC is not configured")
+		return
+	}
+
+	state := r.URL.Query().Get("state")
+	expectedState, err := auth.GetAndClearOIDCCookie(w, r, "oidc_state")
+	if err != nil || state != expectedState {
+		writeError(w, http.StatusBadRequest, "invalid state parameter")
+		return
+	}
+
+	code := r.URL.Query().Get("code")
+	if code == "" {
+		writeError(w, http.StatusBadRequest, "missing authorization code")
+		return
+	}
+
+	pkceVerifier, _ := auth.GetAndClearOIDCCookie(w, r, "oidc_pkce")
+
+	var exchangeOpts []oauth2.AuthCodeOption
+	if pkceVerifier != "" {
+		exchangeOpts = append(exchangeOpts, oauth2.VerifierOption(pkceVerifier))
+	}
+	oauth2Token, err := h.OIDC.OAuth2Config.Exchange(r.Context(), code, exchangeOpts...)
+	if err != nil {
+		slog.Error("oidc token exchange failed", "error", err)
+		writeError(w, http.StatusBadRequest, "failed to exchange token")
+		return
+	}
+
+	rawIDToken, ok := oauth2Token.Extra("id_token").(string)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "no id_token in token response")
+		return
+	}
+
+	expectedNonce, _ := auth.GetAndClearOIDCCookie(w, r, "oidc_nonce")
+	idToken, err := h.OIDC.Verifier.Verify(r.Context(), rawIDToken)
+	if err != nil {
+		slog.Error("oidc id token verification failed", "error", err)
+		writeError(w, http.StatusUnauthorized, "failed to verify ID token")
+		return
+	}
+
+	if expectedNonce != "" && idToken.Nonce != expectedNonce {
+		writeError(w, http.StatusUnauthorized, "invalid nonce in ID token")
+		return
+	}
+
+	var claims struct {
+		Email         string `json:"email"`
+		Name          string `json:"name"`
+		Picture       string `json:"picture"`
+		EmailVerified bool   `json:"email_verified"`
+	}
+	if err := idToken.Claims(&claims); err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to parse ID token claims")
+		return
+	}
+
+	if claims.Email == "" {
+		writeError(w, http.StatusBadRequest, "OIDC account has no email claim")
+		return
+	}
+
+	email := strings.ToLower(strings.TrimSpace(claims.Email))
+
+	user, isNew, err := h.findOrCreateUser(r.Context(), email)
+	if err != nil {
+		var signupErr SignupError
+		if errors.As(err, &signupErr) {
+			writeError(w, http.StatusForbidden, signupErr.Error())
+			return
+		}
+		writeError(w, http.StatusInternalServerError, "failed to create or find user")
+		return
+	}
+
+	if isNew {
+		evt := analytics.Signup(uuidToString(user.ID), user.Email, signupSourceFromRequest(r))
+		evt.Properties["auth_method"] = "oidc"
+		h.Analytics.Capture(evt)
+	}
+
+	needsUpdate := false
+	newName := user.Name
+	newAvatar := user.AvatarUrl
+
+	if claims.Name != "" && user.Name == strings.Split(email, "@")[0] {
+		newName = claims.Name
+		needsUpdate = true
+	}
+	if claims.Picture != "" && !user.AvatarUrl.Valid {
+		newAvatar = pgtype.Text{String: claims.Picture, Valid: true}
+		needsUpdate = true
+	}
+	if needsUpdate {
+		updated, err := h.Queries.UpdateUser(r.Context(), db.UpdateUserParams{
+			ID:        user.ID,
+			Name:      newName,
+			AvatarUrl: newAvatar,
+		})
+		if err == nil {
+			user = updated
+		}
+	}
+
+	tokenString, err := h.issueJWT(user)
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, "failed to issue token")
+		return
+	}
+
+	if err := auth.SetAuthCookies(w, tokenString); err != nil {
+		slog.Warn("failed to set auth cookies", "error", err)
+	}
+
+	if h.CFSigner != nil {
+		for _, cookie := range h.CFSigner.SignedCookies(time.Now().Add(72 * time.Hour)) {
+			http.SetCookie(w, cookie)
+		}
+	}
+
+	slog.Info("user logged in via oidc", append(logger.RequestAttrs(r), "user_id", uuidToString(user.ID), "email", user.Email)...)
+
+	appURL := os.Getenv("MULTICA_APP_URL")
+	if appURL == "" {
+		appURL = "/"
+	}
+	http.Redirect(w, r, appURL, http.StatusFound)
 }
 
 func (h *Handler) UpdateMe(w http.ResponseWriter, r *http.Request) {

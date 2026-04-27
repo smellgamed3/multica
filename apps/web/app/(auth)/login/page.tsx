@@ -57,6 +57,8 @@ function LoginPageContent() {
   const router = useRouter();
   const qc = useQueryClient();
   const googleClientId = useConfigStore((state) => state.googleClientId);
+  const oidcEnabled = useConfigStore((state) => state.oidcEnabled);
+  const oidcProviderName = useConfigStore((state) => state.oidcProviderName);
   const user = useAuthStore((s) => s.user);
   const isLoading = useAuthStore((s) => s.isLoading);
   const searchParams = useSearchParams();
@@ -195,6 +197,7 @@ function LoginPageContent() {
           : undefined
       }
       onTokenObtained={setLoggedInCookie}
+      oidcProviderName={oidcEnabled ? oidcProviderName || "SSO" : undefined}
       extra={
         // Web-only nudge toward the desktop app. Copy is hardcoded EN
         // for now because the login route sits outside the landing

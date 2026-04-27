@@ -42,23 +42,13 @@ interface CliCallbackConfig {
 }
 
 interface LoginPageProps {
-  /** Logo element rendered above the title */
   logo?: ReactNode;
-  /** Called after successful login. The workspace list is seeded into React
-   *  Query before this fires, so the caller can compute a destination URL. */
   onSuccess: () => void;
-  /** Google OAuth config. Omit to disable Google login. */
   google?: GoogleAuthConfig;
-  /** CLI callback config for authorizing CLI tools. */
   cliCallback?: CliCallbackConfig;
-  /** Called after a token is obtained (e.g. to set cookies). */
   onTokenObtained?: () => void;
-  /** Override Google login handler (e.g. desktop opens browser externally). When provided, renders the Google button even if `google` config is omitted. */
   onGoogleLogin?: () => void;
-  /** Slot rendered at the bottom of the sign-in card, below the
-   *  Google button. The web shell uses it for a "Prefer the desktop
-   *  app?" prompt; desktop omits it (a download prompt inside the app
-   *  would be absurd). */
+  oidcProviderName?: string;
   extra?: ReactNode;
 }
 
@@ -103,6 +93,7 @@ export function LoginPage({
   cliCallback,
   onTokenObtained,
   onGoogleLogin,
+  oidcProviderName,
   extra,
 }: LoginPageProps) {
   const qc = useQueryClient();
@@ -474,6 +465,32 @@ export function LoginPage({
                   />
                 </svg>
                 Continue with Google
+              </Button>
+            </>
+          )}
+          {oidcProviderName && (
+            <>
+              {!(google || onGoogleLogin) && (
+                <div className="relative w-full">
+                  <div className="absolute inset-0 flex items-center">
+                    <span className="w-full border-t" />
+                  </div>
+                  <div className="relative flex justify-center text-xs uppercase">
+                    <span className="bg-card px-2 text-muted-foreground">or</span>
+                  </div>
+                </div>
+              )}
+              <Button
+                type="button"
+                variant="outline"
+                className="w-full"
+                size="lg"
+                onClick={() => {
+                  window.location.href = "/auth/oidc/login";
+                }}
+                disabled={loading}
+              >
+                Continue with {oidcProviderName}
               </Button>
             </>
           )}

@@ -65,13 +65,14 @@ type Handler struct {
 	LocalSkillImportStore LocalSkillImportStore
 	Storage               storage.Storage
 	CFSigner              *auth.CloudFrontSigner
+	OIDC                  *auth.OIDCProvider
 	Analytics             analytics.Client
 	PATCache              *auth.PATCache
 	DaemonTokenCache      *auth.DaemonTokenCache
 	cfg                   Config
 }
 
-func New(queries *db.Queries, txStarter txStarter, hub *realtime.Hub, bus *events.Bus, emailService *service.EmailService, store storage.Storage, cfSigner *auth.CloudFrontSigner, analyticsClient analytics.Client, cfg Config, daemonHubs ...*daemonws.Hub) *Handler {
+func New(queries *db.Queries, txStarter txStarter, hub *realtime.Hub, bus *events.Bus, emailService *service.EmailService, store storage.Storage, cfSigner *auth.CloudFrontSigner, oidcProvider *auth.OIDCProvider, analyticsClient analytics.Client, cfg Config, daemonHubs ...*daemonws.Hub) *Handler {
 	var executor dbExecutor
 	if candidate, ok := txStarter.(dbExecutor); ok {
 		executor = candidate
@@ -103,6 +104,7 @@ func New(queries *db.Queries, txStarter txStarter, hub *realtime.Hub, bus *event
 		LocalSkillImportStore: NewInMemoryLocalSkillImportStore(),
 		Storage:               store,
 		CFSigner:              cfSigner,
+		OIDC:                  oidcProvider,
 		Analytics:             analyticsClient,
 		cfg:                   cfg,
 	}

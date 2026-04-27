@@ -2,6 +2,7 @@ package main
 
 import (
 	"context"
+	"log/slog"
 	"net/http"
 	"os"
 	"strings"
@@ -96,12 +97,20 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 
 	cfSigner := auth.NewCloudFrontSignerFromEnv()
 
+	oidcProvider, err := auth.NewOIDCProvider()
+	if err != nil {
+		slog.Error("failed to initialize OIDC provider", "error", err)
+	}
+	if oidcProvider != nil {
+		slog.Info("OIDC provider configured", "issuer", oidcProvider.Issuer)
+	}
+
 	signupConfig := handler.Config{
 		AllowSignup:         os.Getenv("ALLOW_SIGNUP") != "false",
 		AllowedEmails:       splitAndTrim(os.Getenv("ALLOWED_EMAILS")),
 		AllowedEmailDomains: splitAndTrim(os.Getenv("ALLOWED_EMAIL_DOMAINS")),
 	}
-	h := handler.New(queries, pool, hub, bus, emailSvc, store, cfSigner, analyticsClient, signupConfig, daemonHub)
+	h := handler.New(queries, pool, hub, bus, emailSvc, store, cfSigner, oidcProvider, analyticsClient, signupConfig, daemonHub)
 	if opts.DaemonWakeup != nil {
 		h.TaskService.Wakeup = opts.DaemonWakeup
 	}
@@ -196,6 +205,8 @@ func NewRouterWithOptions(pool *pgxpool.Pool, hub *realtime.Hub, bus *events.Bus
 	r.Post("/auth/send-code", h.SendCode)
 	r.Post("/auth/verify-code", h.VerifyCode)
 	r.Post("/auth/google", h.GoogleLogin)
+	r.Get("/auth/oidc/login", h.OIDCLogin)
+	r.Get("/auth/oidc/callback", h.OIDCCallback)
 	r.Post("/auth/logout", h.Logout)
 
 	// Public API
