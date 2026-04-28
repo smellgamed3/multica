@@ -807,6 +807,8 @@ export class ApiClient {
     google_client_id?: string;
     posthog_key?: string;
     posthog_host?: string;
+    oidc_enabled?: boolean;
+    oidc_provider_name?: string;
   }> {
     return this.fetch("/api/config");
   }
