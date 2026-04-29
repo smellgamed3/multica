@@ -686,17 +686,6 @@ func (h *Handler) OIDCCallback(w http.ResponseWriter, r *http.Request) {
 	}
 
 	expectedNonce, _ := auth.GetAndClearOIDCCookie(w, r, "oidc_nonce")
-	idToken, err := h.OIDC.Verifier.Verify(r.Context(), rawIDToken)
-	if err != nil {
-		slog.Error("oidc id token verification failed", "error", err)
-		writeError(w, http.StatusUnauthorized, "failed to verify ID token")
-		return
-	}
-
-	if expectedNonce != "" && idToken.Nonce != expectedNonce {
-		writeError(w, http.StatusUnauthorized, "invalid nonce in ID token")
-		return
-	}
 
 	var claims struct {
 		Email         string `json:"email"`
@@ -704,9 +693,36 @@ func (h *Handler) OIDCCallback(w http.ResponseWriter, r *http.Request) {
 		Picture       string `json:"picture"`
 		EmailVerified bool   `json:"email_verified"`
 	}
-	if err := idToken.Claims(&claims); err != nil {
-		writeError(w, http.StatusInternalServerError, "failed to parse ID token claims")
-		return
+
+	if h.OIDC.UsesHS256 {
+		oidcClaims, err := h.OIDC.VerifyHS256IDToken(r.Context(), os.Getenv("OIDC_CLIENT_ID"), rawIDToken, oauth2Token.AccessToken)
+		if err != nil {
+			slog.Error("oidc HS256 token verification failed", "error", err)
+			writeError(w, http.StatusUnauthorized, "failed to verify ID token")
+			return
+		}
+		if expectedNonce != "" && oidcClaims.Nonce != expectedNonce {
+			writeError(w, http.StatusUnauthorized, "invalid nonce in ID token")
+			return
+		}
+		claims.Email = oidcClaims.Email
+		claims.Name = oidcClaims.Name
+		claims.Picture = oidcClaims.Pic
+	} else {
+		idToken, err := h.OIDC.Verifier.Verify(r.Context(), rawIDToken)
+		if err != nil {
+			slog.Error("oidc id token verification failed", "error", err)
+			writeError(w, http.StatusUnauthorized, "failed to verify ID token")
+			return
+		}
+		if expectedNonce != "" && idToken.Nonce != expectedNonce {
+			writeError(w, http.StatusUnauthorized, "invalid nonce in ID token")
+			return
+		}
+		if err := idToken.Claims(&claims); err != nil {
+			writeError(w, http.StatusInternalServerError, "failed to parse ID token claims")
+			return
+		}
 	}
 
 	if claims.Email == "" {
