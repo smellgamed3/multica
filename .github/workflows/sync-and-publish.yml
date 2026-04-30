@@ -1,0 +1,144 @@
+name: Sync Upstream & Publish to GHCR
+
+on:
+  schedule:
+    # Daily at 00:00 UTC (08:00 CST)
+    - cron: '0 0 * * *'
+  workflow_dispatch:
+    inputs:
+      build_only:
+        description: 'Skip upstream sync, just build & push images'
+        type: boolean
+        default: false
+
+env:
+  GHCR_NS: ghcr.io/${{ github.repository_owner }}
+
+permissions:
+  contents: write
+  packages: write
+  attestations: write
+  id-token: write
+
+jobs:
+  sync-and-publish:
+    runs-on: ubuntu-latest
+    env:
+      DOCKER_BUILDKIT: '1'
+    steps:
+      # ── Checkout & Sync ────────────────────────────────────────────────
+      - uses: actions/checkout@v4
+        with:
+          ref: oidc
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Fetch upstream
+        run: |
+          git remote add upstream https://github.com/multica-ai/multica.git
+          git fetch upstream main
+
+      - name: Sync from upstream
+        if: ${{ !inputs.build_only }}
+        id: sync
+        run: |
+          NEW_COMMITS=$(git rev-list --count HEAD..upstream/main)
+          echo "upstream_commits=$NEW_COMMITS" >> "$GITHUB_OUTPUT"
+
+          if [ "$NEW_COMMITS" -eq 0 ]; then
+            echo "::notice::No new upstream commits — skipping merge."
+            echo "merged=false" >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
+          echo "::notice::Found $NEW_COMMITS new upstream commit(s). Merging into oidc..."
+
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git config user.name "github-actions[bot]"
+
+          if git merge upstream/main --no-edit --no-ff; then
+            echo "merged=true" >> "$GITHUB_OUTPUT"
+            git push origin oidc
+            echo "pushed=true" >> "$GITHUB_OUTPUT"
+            echo "::notice::Merge pushed to oidc branch."
+          else
+            echo "merged=failed" >> "$GITHUB_OUTPUT"
+            echo "::error::⚠️  Merge conflict! Manual resolution required:"
+            echo "::error::  git checkout oidc && git merge upstream/main"
+            echo "::error::  # resolve conflicts, commit, then: git push origin oidc"
+            exit 1
+          fi
+
+      # ── Docker Build & Push ───────────────────────────────────────────
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Login to GHCR
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Docker meta (backend)
+        id: meta-backend
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.GHCR_NS }}/multica-backend
+          tags: |
+            type=raw,value=latest
+            type=sha,prefix=
+
+      - name: Build & push backend image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile
+          push: true
+          tags: ${{ steps.meta-backend.outputs.tags }}
+          labels: ${{ steps.meta-backend.outputs.labels }}
+          build-args: |
+            VERSION=${{ github.sha }}
+            COMMIT=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      - name: Docker meta (web)
+        id: meta-web
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.GHCR_NS }}/multica-web
+          tags: |
+            type=raw,value=latest
+            type=sha,prefix=
+
+      - name: Build & push web image
+        uses: docker/build-push-action@v5
+        with:
+          context: .
+          file: Dockerfile.web
+          push: true
+          tags: ${{ steps.meta-web.outputs.tags }}
+          labels: ${{ steps.meta-web.outputs.labels }}
+          build-args: |
+            REMOTE_API_URL=http://backend:8080
+            NEXT_PUBLIC_APP_VERSION=${{ github.sha }}
+          cache-from: type=gha
+          cache-to: type=gha,mode=max
+
+      # ── Summary ──────────────────────────────────────────────────────
+      - name: Output summary
+        run: |
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          echo "### 📦 Published images" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "| Image | Tags |" >> "$GITHUB_STEP_SUMMARY"
+          echo "|-------|------|" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **backend** | \`${{ env.GHCR_NS }}/multica-backend:latest\` \`${{ env.GHCR_NS }}/multica-backend:$SHORT_SHA\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "| **web**     | \`${{ env.GHCR_NS }}/multica-web:latest\` \`${{ env.GHCR_NS }}/multica-web:$SHORT_SHA\` |" >> "$GITHUB_STEP_SUMMARY"
+          echo "" >> "$GITHUB_STEP_SUMMARY"
+          echo "**Usage (self-host):**" >> "$GITHUB_STEP_SUMMARY"
+          echo '```yaml' >> "$GITHUB_STEP_SUMMARY"
+          echo "  backend: ${{ env.GHCR_NS }}/multica-backend:latest" >> "$GITHUB_STEP_SUMMARY"
+          echo "  web: ${{ env.GHCR_NS }}/multica-web:latest" >> "$GITHUB_STEP_SUMMARY"
+          echo '```' >> "$GITHUB_STEP_SUMMARY"
