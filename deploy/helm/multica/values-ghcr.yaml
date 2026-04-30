@@ -1,0 +1,33 @@
+# GHCR image overrides for multica Helm chart
+# Use with: helm upgrade ... -f values-prod.yaml -f values-ghcr.yaml
+#
+# Requires either:
+#   A) Make GHCR packages public (recommended for open-source forks):
+#      https://github.com/smellgamed3/multica/pkgs/container/multica-backend/settings
+#      https://github.com/smellgamed3/multica/pkgs/container/multica-web/settings
+#      → Set Visibility to "Public"
+#   B) Create a GHCR pull secret if keeping packages private:
+#      kubectl create secret docker-registry ghcr-secret \
+#        --docker-server=ghcr.io \
+#        --docker-username=smellgamed3 \
+#        --docker-password=<github-token> \
+#        --namespace=default
+#      Then uncomment imagePullSecrets below.
+
+registry: ghcr.io
+imageTag: "latest"
+
+backend:
+  image:
+    repository: smellgamed3/multica-backend
+
+frontend:
+  image:
+    repository: smellgamed3/multica-web
+
+# Option A (public packages): clear imagePullSecrets
+imagePullSecrets: []
+
+# Option B (private packages): comment block above, uncomment block below
+# imagePullSecrets:
+#   - name: ghcr-secret
